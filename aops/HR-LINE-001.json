@@ -1,0 +1,126 @@
+{
+  "aop": "fault-management/HR-LINE-001",
+  "version": "v1.0.0",
+  "lifecycle": {
+    "specification_status": "approved",
+    "release_status": "released",
+    "operational_applicability": "effective"
+  },
+  "intent": {
+    "objective": "Operate the domain agent harness for line fault management: bound every agent operating inside it to the tools, credentials, escalation routes and verification obligations declared here.",
+    "outcome_condition": "Every action executed inside the harness is attributable to an AOP decision rule, carries a scoped credential, and lands in the append-only case record.",
+    "scope_boundary": {
+      "in_scope": ["All agent operations inside the fault-management harness boundary"],
+      "out_of_scope": ["Agent operations in other domains' harnesses", "Human operator actions outside the harness"]
+    },
+    "intent_hypothesis": "The harness boundary claim: no agent inside this harness can exceed the authority any inner AOP grants, whatever the inner AOPs say, because this boundary is the top-level AOP for the domain (SEC-11)."
+  },
+  "context": {
+    "elements": [
+      { "name": "harness-configuration", "source": "version-controlled harness configuration", "access_rule": "read-only to agents; changed only through the governance of aop-governance" },
+      { "name": "case-context", "source": "the inner AOP run's case context", "access_rule": "scoped per case and authority level (SEC-4)" }
+    ],
+    "snapshot_semantics": "The harness snapshots its own configuration check at each run start.",
+    "minimisation_rule": "The harness passes agents no more context than the inner AOP's Context dimension admits."
+  },
+  "constraints": {
+    "permitted_actions": ["provide-tools", "issue-scoped-credential", "enforce-authority-check", "dispatch-escalation", "append-case-record", "verify-run"],
+    "prohibited_actions": ["grant-standing-credential", "execute-unapproved-action", "edit-case-record", "widen-agent-authority"],
+    "fail_closed": true
+  },
+  "authority": {
+    "default_authority_class": "prohibited",
+    "risk_axes": [
+      { "axis": "risk", "assessment": "High: the harness is the enforcement point for every run in the domain; a boundary failure widens authority everywhere at once." },
+      { "axis": "reversibility", "assessment": "A widened boundary is reversible by redeploying the previous harness version; a leaked standing credential is not." },
+      { "axis": "operational-impact", "assessment": "Every run in the domain crosses this boundary." },
+      { "axis": "authority-threshold", "assessment": "Any change to the boundary requires programme-owner approval through aop-governance." },
+      { "axis": "assurance-requirement", "assessment": "Chain-verified case record per run; harness conformance profile before release." }
+    ],
+    "decision_rights_ladder": [
+      { "condition": "Routine enforcement actions inside the declared boundary", "minimum_authority_class": "autonomous" },
+      { "condition": "Any change to the boundary itself", "minimum_authority_class": "approval-required" }
+    ]
+  },
+  "capabilities": {
+    "skills": [
+      { "id": "fault-management/SK-HARNESS-ENFORCE@v1.0.0", "credential_class": "harness-internal" }
+    ]
+  },
+  "coordination": {
+    "handoffs": [
+      { "from": "harness", "to": "inner-AOP runtime", "payload": "tool access, scoped credentials, the approved action", "acknowledgement": "execution recorded in the case record" },
+      { "from": "harness", "to": "shift-supervisor or on-call-engineer", "payload": "evidence bundle per the inner AOP's escalation routes", "acknowledgement": "ruling recorded in the case record" }
+    ],
+    "escalation_routes": [
+      { "authority_class": "unknown", "target_role": "on-call-engineer", "evidence_bundle": "full trace with harness configuration snapshot" },
+      { "authority_class": "approval-required", "target_role": "programme-owner", "evidence_bundle": "boundary-change bundle" }
+    ]
+  },
+  "control": {
+    "validation_obligations": [
+      "At each run start, verify the inner AOP reference resolves to one immutable version (NM-STR-11).",
+      "At each run end, verify the case record chain extends correctly."
+    ],
+    "intervention": "The harness pauses a run whose guardrail raises an enforcement error; pause events are recorded.",
+    "drift_obligation": "A change in escalation rates or fail-closed rates inside the harness beyond the declared band triggers review of this top-level AOP."
+  },
+  "assurance": {
+    "case_record": {
+      "append_only": true,
+      "fields": ["inputs", "context snapshot", "rule", "provenance", "decision", "approver", "outcome"]
+    },
+    "human_baseline": {
+      "metrics": [
+        { "metric": "guardrail-fail-closed-rate", "observed_value": "not yet baselined; first hundred runs establish it" }
+      ]
+    },
+    "replay": true
+  },
+  "structure": {
+    "variants": [
+      {
+        "id": "VAR-HARNESS-001",
+        "name": "Standard governed run",
+        "frequency": 1.0,
+        "trigger": "a run starts inside the harness boundary",
+        "steps": ["provide-tools", "enforce-authority-check", "issue-scoped-credential", "append-case-record", "verify-run"],
+        "decision_rules": [
+          {
+            "if": "the proposed action is within the boundary and the inner AOP authorises it",
+            "then": "enforce and record",
+            "authority": "autonomous",
+            "provenance": { "observed_cases": 1, "path_frequency": 1.0 }
+          },
+          {
+            "if": "the boundary itself is to change",
+            "then": "route to the programme owner through aop-governance",
+            "authority": "approval-required",
+            "provenance": { "observed_cases": 1, "path_frequency": 1.0 }
+          }
+        ],
+        "provenance": { "observed_cases": 1, "path_frequency": 1.0 }
+      }
+    ],
+    "exception_edges": [
+      {
+        "condition": "enforcement component error",
+        "behaviour": "escalate",
+        "target_role": "on-call-engineer",
+        "severity": "critical"
+      }
+    ],
+    "rework_loops": []
+  },
+  "provenance": {
+    "source": "cg://case/HR-LINE-001@2026-11-04T00:00:00Z",
+    "derived_from": {
+      "observed_cases": 1,
+      "variants": 1,
+      "last_recalibrated": "2026-11-04"
+    }
+  },
+  "governance": {
+    "audit": "case-record"
+  }
+}

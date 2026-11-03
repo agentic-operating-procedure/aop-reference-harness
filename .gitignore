@@ -1,0 +1,8 @@
+# Local working configuration, excluded from published content (ADR-0008).
+context/
+context/AGENT-DOCTRINE.md
+AGENT-DOCTRINE.md
+
+# Editor and OS noise
+.DS_Store
+*.swp
