@@ -55,6 +55,9 @@ class Runtime:
         self.approver = approver or ApproverPolicy()
         self.store = CaseRecordStore(record_path)
         self.accountable_owner = aop.get("governance", {}).get("accountable_owner")
+        # NM-VER-6: an optional revocation provider; called with the bound ref
+        # before a run binds. Returns a dict or None.
+        self.revocation_provider = None
         self.halted = False
         self.stats = {"runs": 0, "executed": 0, "approvals": 0, "escalations": 0, "prohibited": 0, "fail_closed": 0, "holds": 0, "budget_escalations": 0, "duplicates_answered": 0}
         # RA-10: executed action digests per case, for duplicate delivery.
@@ -82,6 +85,17 @@ class Runtime:
         snapshot_ref = "cg://case/%s@%s" % (case_id, time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()))
         self.stats["runs"] += 1
 
+        ref = self.aop_ref
+        if self.revocation_provider is not None:
+            state = self.revocation_provider(ref)
+            if state and state.get("revoked"):
+                # NM-VER-6: a revoked version holds at the enforcement point.
+                self.stats["holds"] += 1
+                self.store.append(case_id, ref, None, context, snapshot_ref,
+                                  None, None, "hold", None,
+                                  {"result": RunOutcome.INCONCLUSIVE,
+                                   "note": "bound version revoked: %s" % state.get("reason", "")})
+                return {"case_id": case_id, "outcome": RunOutcome.INCONCLUSIVE, "held": True}
         if self.halted:
             # SEC-15: an emergency stop halts runs at the enforcement point.
             self.stats["holds"] += 1
@@ -140,26 +154,30 @@ class Runtime:
                 bundle = build_evidence_bundle(case_id, self.aop, decision, context, action)
                 target = self.dispatch.route_for(decision["authority"])
                 ruling = self.dispatch.dispatch(bundle, target, self.approver)
+                ruling["ruled_at"] = ruling["dispatched_at"]  # reference approver rules immediately
                 notes.append("%s escalated to %s: %s" % (action, target, ruling["ruling"]["note"]))
-                if not ruling["ruling"].get("approve"):
+                if ruling["ruling"].get("outcome") != "approve":
                     outcome = RunOutcome.NOT_ACHIEVED if outcome == RunOutcome.ACHIEVED else outcome
                     self.store.append(case_id, self.aop_ref, variant["id"], context, snapshot_ref,
-                                      decision["rule"], decision["provenance"], "escalate", ruling["approver"],
-                                      {"result": outcome, "note": "escalation rejected"})
+                                      decision["rule"], decision["provenance"], ruling["ruling"].get("outcome", "reject"), ruling["approver"],
+                                      {"result": outcome, "note": ruling["ruling"].get("note", "not approved")})
                     break
                 decision = {**decision, "decision": Decision.EXECUTE, "note": "approved by " + ruling["approver"]}
 
             if decision["decision"] == Decision.APPROVAL_REQUIRED:
                 self.stats["approvals"] += 1
-                bundle = build_evidence_bundle(case_id, self.aop, decision, context, action)
+                bundle = build_evidence_bundle(case_id, self.aop, decision, context, action,
+                                               action_digest=self.guardrail.action_digest(action, parameters={k: context.get(k) for k in sorted(self.guardrail.trusted_keys) if context.get(k) is not None}))
                 target = self.dispatch.route_for(decision["authority"])
-                ruling = self.dispatch.dispatch(bundle, target, self.approver)
+                ruling = self.dispatch.dispatch(bundle, target, self.approver,
+                                                fallback_role=(self.aop.get("assurance", {}).get("oversight") or {}).get("fallback_role"))
+                ruling["ruled_at"] = ruling["dispatched_at"]
                 notes.append("%s approval required: %s" % (action, ruling["ruling"]["note"]))
-                if not ruling["ruling"].get("approve"):
+                if ruling["ruling"].get("outcome") != "approve":
                     outcome = RunOutcome.NOT_ACHIEVED if outcome == RunOutcome.ACHIEVED else outcome
                     self.store.append(case_id, self.aop_ref, variant["id"], context, snapshot_ref,
-                                      decision["rule"], decision["provenance"], "escalate", ruling["approver"],
-                                      {"result": outcome, "note": "approval rejected"})
+                                      decision["rule"], decision["provenance"], ruling["ruling"].get("outcome", "reject"), ruling["approver"],
+                                      {"result": outcome, "note": ruling["ruling"].get("note", "not approved")})
                     break
                 self.store.append(case_id, self.aop_ref, variant["id"], context, snapshot_ref,
                                   decision["rule"], decision["provenance"], "approval", ruling["approver"],
@@ -183,6 +201,19 @@ class Runtime:
                 self.store.append(case_id, self.aop_ref, variant["id"], context, snapshot_ref,
                                   budget["rule"], None, "escalate", None,
                                   {"result": RunOutcome.PARTIALLY_ACHIEVED, "note": budget["note"]})
+                outcome = RunOutcome.PARTIALLY_ACHIEVED
+                continue
+
+            # RA-21: the canonical payload is validated against the declared
+            # parameter schema immediately before execution.
+            params = {k: context.get(k) for k in sorted(self.guardrail.trusted_keys) if context.get(k) is not None}
+            pfail = self.guardrail.parameter_verdict(action, params)
+            if pfail is not None:
+                self.stats["fail_closed"] += 1
+                notes.append("%s %s" % (action, pfail["note"]))
+                self.store.append(case_id, self.aop_ref, variant["id"], context, snapshot_ref,
+                                  pfail["rule"], None, "escalate", None,
+                                  {"result": RunOutcome.PARTIALLY_ACHIEVED, "note": pfail["note"]})
                 outcome = RunOutcome.PARTIALLY_ACHIEVED
                 continue
 

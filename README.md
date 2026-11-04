@@ -7,7 +7,7 @@
 | Authority | A working harness: runtime loop, guardrail, credential broker, escalation, evidence record |
 | Tier | Runtime |
 | Landing wave | 4 |
-| Version | 0.3.0 |
+| Version | 0.4.0 |
 | Status | Stable |
 | Licence | MIT |
 

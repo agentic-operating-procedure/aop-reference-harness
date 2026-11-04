@@ -4,6 +4,16 @@ All notable changes to this repository are documented here. Format follows [Keep
 
 ## [Unreleased]
 
+## [v0.4.0] - 2026-11-05
+
+### Added (Wave H2)
+
+- The approval object in the dispatch: bundles bind the action digest and expiry; rulings carry the four outcomes; non-response routes to the fallback role and never approves (RA-15, RA-16).
+- Canary bundles and oversight metrics: approval rate, time-to-approve, canary detection with the failing-approver alert (RA-19).
+- Parameter validation against the AOP's declared schemas at execution time (RA-21).
+- The revocation hook: a run consults the bound version's revocation state and a revoked version holds (NM-VER-6).
+
+
 ## [v0.3.0] - 2026-11-05
 
 ### Added (Wave H1: CR-011, CR-012, CR-009-3)
@@ -36,7 +46,8 @@ All notable changes to this repository are documented here. Format follows [Keep
 - Published the scripted reference agent: the least authoritative, most replaceable part of the estate.
 - Published the Phase 4 end-to-end gate and passed it: one procedure compiles, publishes, resolves with an intact provenance chain, and executes 40 cases under the guardrail with complete, chain-verified case records.
 
-[Unreleased]: https://github.com/agentic-operating-procedure/aop-reference-harness/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/agentic-operating-procedure/aop-reference-harness/compare/v0.4.0...HEAD
+[v0.4.0]: https://github.com/agentic-operating-procedure/aop-reference-harness/compare/v0.3.0...v0.4.0
 [v0.3.0]: https://github.com/agentic-operating-procedure/aop-reference-harness/compare/v0.2.0...v0.3.0
 [v0.2.0]: https://github.com/agentic-operating-procedure/aop-reference-harness/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/agentic-operating-procedure/aop-reference-harness/releases/tag/v0.1.0

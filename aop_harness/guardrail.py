@@ -39,6 +39,8 @@ class Guardrail:
             self.aggregate_limits[limit["action_class"]] = limit
         # NM-AUT-8: reversibility classes per action.
         self.reversibility = {r["action"]: r for r in aop.get("authority", {}).get("reversibility_classes", [])}
+        # RA-20: typed parameter schemas per action.
+        self.action_schemas = {a["action"]: a for a in aop.get("constraints", {}).get("action_schemas", [])}
         self.trusted_keys = set()
         for el in aop.get("context", {}).get("elements", []):
             if el.get("trust_class") in ("system-attested", "derived"):
@@ -89,6 +91,46 @@ class Guardrail:
         canonical = json.dumps({"action": action, "target": target,
                                 "parameters": parameters or {}}, sort_keys=True)
         return "sha256:" + hashlib.sha256(canonical.encode()).hexdigest()
+
+    def parameter_verdict(self, action: str, params: dict) -> dict | None:
+        """RA-21: validate the canonical payload against the declared schema
+        immediately before execution. Returns an escalate decision on any
+        violation; None means the payload conforms (or no schema is declared,
+        which is a declared gap, not an unexamined freedom)."""
+        schema = self.action_schemas.get(action)
+        if schema is None:
+            return None
+        declared = {f["name"]: f for f in schema.get("required_fields", [])}
+        for name, value in (params or {}).items():
+            if name not in declared:
+                return self._param_fail(action, "unknown field %r (RA-22)" % name)
+            spec = declared[name]
+            if spec.get("type") == "integer" and not isinstance(value, int):
+                return self._param_fail(action, "field %r must be an integer" % name)
+            if spec.get("type") == "number" and not isinstance(value, (int, float)):
+                return self._param_fail(action, "field %r must be a number" % name)
+            if spec.get("type") == "string" and not isinstance(value, str):
+                return self._param_fail(action, "field %r must be a string" % name)
+            if spec.get("type") == "boolean" and not isinstance(value, bool):
+                return self._param_fail(action, "field %r must be a boolean" % name)
+            if "minimum" in spec and value < spec["minimum"]:
+                return self._param_fail(action, "field %r below the declared minimum" % name)
+            if "maximum" in spec and value > spec["maximum"]:
+                return self._param_fail(action, "field %r above the declared maximum (RA-22)" % name)
+            if "allowed_values" in spec and value not in spec["allowed_values"]:
+                return self._param_fail(action, "field %r outside the allowed values" % name)
+        for name, spec in declared.items():
+            if name not in (params or {}):
+                return self._param_fail(action, "required field %r missing from the payload (RA-22)" % name)
+        for banned in schema.get("prohibited_values", []):
+            if banned in (params or {}).values():
+                return self._param_fail(action, "prohibited value present in the payload")
+        return None
+
+    def _param_fail(self, action: str, note: str) -> dict:
+        return {"decision": Decision.ESCALATE, "authority": "parameter-schema",
+                "rule": {"if": "parameter schema of %s" % action, "then": "fail closed on payload violation"},
+                "provenance": None, "note": note}
 
     def budget_verdict(self, action: str, usage: dict) -> dict | None:
         """NM-CRD-4: return an escalate decision when the action's class is
