@@ -9,6 +9,9 @@ enforcement errors (SEC-5, SEC-7).
 
 from __future__ import annotations
 
+import hashlib
+import json
+
 from . import expression
 
 
@@ -29,6 +32,13 @@ class Guardrail:
         # derived facts. Each declared element binds to its runtime key (or
         # its name, in identifier form); anything else in the snapshot is
         # invisible to matching and to authority evaluation.
+        # NM-CRD-4: aggregate budgets per action class, enforced beside the
+        # authority check. Usage is counted per case by the runtime.
+        self.aggregate_limits = {}
+        for limit in aop.get("coordination", {}).get("aggregate_limits", []):
+            self.aggregate_limits[limit["action_class"]] = limit
+        # NM-AUT-8: reversibility classes per action.
+        self.reversibility = {r["action"]: r for r in aop.get("authority", {}).get("reversibility_classes", [])}
         self.trusted_keys = set()
         for el in aop.get("context", {}).get("elements", []):
             if el.get("trust_class") in ("system-attested", "derived"):
@@ -72,6 +82,43 @@ class Guardrail:
         if fallback is not None:
             return fallback, "fallback to declared residual variant"
         return None, "no variant matched"
+
+    @staticmethod
+    def action_digest(action: str, target: str | None = None, parameters: dict | None = None) -> str:
+        """RA-5: the canonical action digest: name, target and full payload."""
+        canonical = json.dumps({"action": action, "target": target,
+                                "parameters": parameters or {}}, sort_keys=True)
+        return "sha256:" + hashlib.sha256(canonical.encode()).hexdigest()
+
+    def budget_verdict(self, action: str, usage: dict) -> dict | None:
+        """NM-CRD-4: return an escalate decision when the action's class is
+        over its declared aggregate budget for this case. None means within
+        budget. Called by the runtime before each execution attempt."""
+        action_class = None
+        # The runtime supplies usage keyed by action class; the action maps to
+        # a class through the harness ACTION_CLASSES table.
+        from . import runtime as _runtime  # local import to avoid a cycle at module load
+        action_class = _runtime.ACTION_CLASSES.get(action, "default")
+        limit = self.aggregate_limits.get(action_class)
+        if limit is None:
+            return None
+        used = usage.get(action_class, 0)
+        max_per_case = limit.get("max_per_case")
+        if max_per_case is not None and used >= max_per_case:
+            return {"decision": Decision.ESCALATE, "authority": "budget",
+                    "rule": {"if": "aggregate limit for %s" % action_class, "then": "escalate: budget exhausted"},
+                    "provenance": None,
+                    "note": "aggregate limit reached for %s (%d of %s per case)" % (action_class, used, max_per_case)}
+        return None
+
+    def irreversibility_verdict(self, action: str, decision: dict) -> dict:
+        """NM-AUT-8: an irreversible action is never executed autonomously;
+        an autonomous verdict on it is forced up to approval-required."""
+        rc = self.reversibility.get(action)
+        if rc and rc.get("class") == "irreversible" and decision.get("decision") == Decision.EXECUTE:
+            return {**decision, "decision": Decision.APPROVAL_REQUIRED,
+                    "note": "irreversible action raised to approval-required (NM-AUT-8)"}
+        return decision
 
     def authorise(self, variant: dict | None, action: str, context: dict) -> dict:
         """Decide one proposed action. Returns a decision record with the rule

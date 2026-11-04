@@ -25,6 +25,17 @@ ACTION_CLASSES = {
     "reconcile-inventory": "inventory-write",
 }
 
+# RA-8: the retry class per action. Deployment configuration in a real
+# estate; the reference table demonstrates all three classes.
+ACTION_RETRY_CLASS = {
+    "correlate-alarms": "idempotent",
+    "loopback-test": "idempotent",
+    "resolve-fault": "idempotent",
+    "notify-planning": "idempotent",
+    "reconcile-inventory": "reconciling",
+    "dispatch-field-crew": "manual",
+}
+
 
 class RunOutcome:
     ACHIEVED = "achieved"
@@ -45,7 +56,11 @@ class Runtime:
         self.store = CaseRecordStore(record_path)
         self.accountable_owner = aop.get("governance", {}).get("accountable_owner")
         self.halted = False
-        self.stats = {"runs": 0, "executed": 0, "approvals": 0, "escalations": 0, "prohibited": 0, "fail_closed": 0, "holds": 0}
+        self.stats = {"runs": 0, "executed": 0, "approvals": 0, "escalations": 0, "prohibited": 0, "fail_closed": 0, "holds": 0, "budget_escalations": 0, "duplicates_answered": 0}
+        # RA-10: executed action digests per case, for duplicate delivery.
+        self._executed_digests: dict[str, dict] = {}
+        # NM-CRD-4: per-case usage counters keyed by action class.
+        self._class_usage: dict[str, int] = {}
 
     def emergency_stop(self, role: str) -> dict:
         """SEC-15: a named role halts every subsequent run in the domain at
@@ -100,7 +115,7 @@ class Runtime:
 
         for action in plan:
             try:
-                decision = self.guardrail.authorise(variant, action, context)
+                decision = self.guardrail.irreversibility_verdict(action, self.guardrail.authorise(variant, action, context))
             except Exception as exc:  # noqa: BLE001
                 # SEC-14: hold, record, escalate; never proceed on a broken check.
                 self.stats["holds"] += 1
@@ -151,7 +166,27 @@ class Runtime:
                                   {"result": RunOutcome.PARTIALLY_ACHIEVED, "note": "approved, executing"})
                 decision = {**decision, "decision": Decision.EXECUTE, "note": "approved by " + ruling["approver"]}
 
-            # Execute with a scoped credential (SEC-3).
+            # RA-6: the decision binds to the action digest; a credential
+            # authorises the digest, not the action name alone.
+            digest = self.guardrail.action_digest(action, parameters={k: context.get(k) for k in self.guardrail.trusted_keys})
+            if digest in self._executed_digests:
+                # RA-10: duplicate delivery is answered from the record.
+                self.stats["duplicates_answered"] += 1
+                notes.append("%s duplicate delivery answered from the record (RA-10)" % action)
+                continue
+
+            # NM-CRD-4: the budget verdict is checked beside the authority check.
+            budget = self.guardrail.budget_verdict(action, self._class_usage)
+            if budget is not None:
+                self.stats["budget_escalations"] += 1
+                notes.append("%s %s" % (action, budget["note"]))
+                self.store.append(case_id, self.aop_ref, variant["id"], context, snapshot_ref,
+                                  budget["rule"], None, "escalate", None,
+                                  {"result": RunOutcome.PARTIALLY_ACHIEVED, "note": budget["note"]})
+                outcome = RunOutcome.PARTIALLY_ACHIEVED
+                continue
+
+            # Execute with a scoped credential (SEC-3), scoped to the digest.
             credential = self.broker.issue(action, ACTION_CLASSES.get(action, "default"), decision, approval_record={"approved": True})
             if credential is None or not self.broker.validate(credential, action):
                 self.stats["fail_closed"] += 1
@@ -161,8 +196,10 @@ class Runtime:
                                   decision["rule"], decision["provenance"], "fail-closed", None,
                                   {"result": outcome, "note": "credential broker refused"})
                 break
+            self._executed_digests[digest] = {"action": action, "decision": decision["decision"]}
+            self._class_usage[ACTION_CLASSES.get(action, "default")] = self._class_usage.get(ACTION_CLASSES.get(action, "default"), 0) + 1
             self.stats["executed"] += 1
-            notes.append("%s executed under scoped credential" % action)
+            notes.append("%s executed under digest-scoped credential %s" % (action, digest[:19]))
 
         final_result = case.get("outcome", {}).get("result", outcome) if outcome == RunOutcome.ACHIEVED else outcome
         self.store.append(case_id, self.aop_ref, variant["id"], context, snapshot_ref,
