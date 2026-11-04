@@ -25,7 +25,22 @@ class Guardrail:
         self.permitted = set(aop.get("constraints", {}).get("permitted_actions", []))
         self.prohibited = set(aop.get("constraints", {}).get("prohibited_actions", []))
         self.default_class = aop.get("authority", {}).get("default_authority_class", "prohibited")
+        # NM-STR-16: the decision context contains only system-attested and
+        # derived facts. Each declared element binds to its runtime key (or
+        # its name, in identifier form); anything else in the snapshot is
+        # invisible to matching and to authority evaluation.
+        self.trusted_keys = set()
+        for el in aop.get("context", {}).get("elements", []):
+            if el.get("trust_class") in ("system-attested", "derived"):
+                key = (el.get("key") or el.get("name") or "").lower()
+                self.trusted_keys.add(key)
+                self.trusted_keys.add(key.replace("-", "_"))
         self._validate_closure()
+
+    def decision_context(self, context: dict) -> dict:
+        """The attested-and-derived view of the snapshot: the only context
+        the decision point sees (NM-STR-16)."""
+        return {k: v for k, v in context.items() if k in self.trusted_keys}
 
     def _validate_closure(self):
         """A guardrail that starts wider than its AOP is a defect."""
@@ -35,6 +50,7 @@ class Guardrail:
             raise ValueError("AOP governance error: unknown default authority class")
 
     def match_variant(self, context: dict) -> tuple[dict | None, str]:
+        context = self.decision_context(context)
         """Match the context snapshot to a variant (NM-STR-8). Machine-evaluable
         triggers are tested in declared order against this context; a variant
         whose trigger cannot be evaluated at all is the fallback candidate.
@@ -61,6 +77,7 @@ class Guardrail:
         """Decide one proposed action. Returns a decision record with the rule
         applied and its provenance. This method is the whole of the agent's
         authority: what it returns is what executes, nothing else."""
+        context = self.decision_context(context)
         # 1. Prohibited outright.
         if action in self.prohibited:
             return {"decision": Decision.PROHIBIT, "authority": "prohibited",

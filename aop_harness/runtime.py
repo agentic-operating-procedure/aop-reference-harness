@@ -43,7 +43,22 @@ class Runtime:
         self.dispatch = EscalationDispatch(aop.get("coordination", {}).get("escalation_routes", []))
         self.approver = approver or ApproverPolicy()
         self.store = CaseRecordStore(record_path)
-        self.stats = {"runs": 0, "executed": 0, "approvals": 0, "escalations": 0, "prohibited": 0, "fail_closed": 0}
+        self.accountable_owner = aop.get("governance", {}).get("accountable_owner")
+        self.halted = False
+        self.stats = {"runs": 0, "executed": 0, "approvals": 0, "escalations": 0, "prohibited": 0, "fail_closed": 0, "holds": 0}
+
+    def emergency_stop(self, role: str) -> dict:
+        """SEC-15: a named role halts every subsequent run in the domain at
+        the enforcement point. Resumption requires the accountable owner."""
+        self.halted = True
+        return {"stopped_by": role, "resumption_requires": self.accountable_owner}
+
+    def resume(self, role: str) -> bool:
+        """Only the accountable owner may authorise resumption (SEC-15)."""
+        if role == self.accountable_owner:
+            self.halted = False
+            return True
+        return False
 
     def run_case(self, case: dict, agent) -> dict:
         """Execute one case. The agent proposes; this loop disposes."""
@@ -52,7 +67,23 @@ class Runtime:
         snapshot_ref = "cg://case/%s@%s" % (case_id, time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()))
         self.stats["runs"] += 1
 
-        variant, match_note = self.guardrail.match_variant(context)
+        if self.halted:
+            # SEC-15: an emergency stop halts runs at the enforcement point.
+            self.stats["holds"] += 1
+            self.store.append(case_id, self.aop_ref, None, context, snapshot_ref,
+                              None, None, "hold", None,
+                              {"result": RunOutcome.INCONCLUSIVE, "note": "domain halted by emergency stop"})
+            return {"case_id": case_id, "outcome": RunOutcome.INCONCLUSIVE, "held": True}
+
+        try:
+            variant, match_note = self.guardrail.match_variant(context)
+        except Exception as exc:  # noqa: BLE001
+            # SEC-14: enforcement unavailability holds the run. It never proceeds.
+            self.stats["holds"] += 1
+            self.store.append(case_id, self.aop_ref, None, context, snapshot_ref,
+                              None, None, "hold", None,
+                              {"result": RunOutcome.INCONCLUSIVE, "note": "enforcement unavailable: %s" % exc})
+            return {"case_id": case_id, "outcome": RunOutcome.INCONCLUSIVE, "held": True}
         if variant is None:
             # NM-STR-9: no matching variant fails closed.
             self.stats["fail_closed"] += 1
@@ -68,7 +99,17 @@ class Runtime:
         notes = [match_note]
 
         for action in plan:
-            decision = self.guardrail.authorise(variant, action, context)
+            try:
+                decision = self.guardrail.authorise(variant, action, context)
+            except Exception as exc:  # noqa: BLE001
+                # SEC-14: hold, record, escalate; never proceed on a broken check.
+                self.stats["holds"] += 1
+                notes.append("%s held: enforcement unavailable" % action)
+                outcome = RunOutcome.INCONCLUSIVE
+                self.store.append(case_id, self.aop_ref, variant["id"], context, snapshot_ref,
+                                  None, None, "hold", None,
+                                  {"result": outcome, "note": "enforcement unavailable: %s" % exc})
+                break
 
             if decision["decision"] == Decision.PROHIBIT:
                 self.stats["prohibited"] += 1
