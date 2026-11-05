@@ -22,8 +22,13 @@ def _entry_hash(entry: dict) -> str:
 
 
 class CaseRecordStore:
-    def __init__(self, path: str):
+    def __init__(self, path: str, payload_store_path: str | None = None):
         self.path = path
+        # NM-ASR-7: sensitive payloads may be externalised to a side store so
+        # erasure never requires editing the chain. The entry carries the
+        # payload digest and an externalised marker; the side store carries
+        # the content, keyed by the entry hash.
+        self.payload_store_path = payload_store_path
         self._seq = 0
         self._prev_hash = "0" * 64
         if os.path.exists(path):
@@ -37,7 +42,8 @@ class CaseRecordStore:
 
     def append(self, case_id: str, aop_ref: str, variant_id: str | None, inputs: dict,
                context_snapshot: str, rule: dict | None, provenance: dict | None,
-               decision: str, approver: str | None, outcome: dict) -> dict:
+               decision: str, approver: str | None, outcome: dict,
+               component_matrix: dict | None = None) -> dict:
         # Structural completeness: the record always carries every mandatory
         # field; rule, provenance and approver may be None when genuinely
         # absent from the decision, but the fields themselves are never
@@ -46,13 +52,23 @@ class CaseRecordStore:
                    if locals().get(f) is None]
         if missing:
             raise ValueError("case record would be incomplete: missing %s (NM-ASR-1)" % ", ".join(missing))
+        if self.payload_store_path is not None:
+            payload_json = json.dumps(inputs, sort_keys=True)
+            payload_digest = "sha256:" + hashlib.sha256(payload_json.encode()).hexdigest()
+            with open(self.payload_store_path, "a") as side:
+                side.write(json.dumps({"entry_seq": self._seq + 1, "case_id": case_id,
+                                       "payload_digest": payload_digest, "payload": inputs}) + "\n")
+            stored_inputs = {"externalised": True, "payload_digest": payload_digest}
+        else:
+            stored_inputs = inputs
         entry = {
             "seq": self._seq + 1,
             "appended_at": time.time(),
             "case_id": case_id,
             "aop": aop_ref,
             "variant": variant_id,
-            "inputs": inputs,
+            "inputs": stored_inputs,
+            "component_matrix": component_matrix,
             "context_snapshot": context_snapshot,
             "rule": rule,
             "provenance": provenance,

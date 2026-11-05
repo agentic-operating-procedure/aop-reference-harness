@@ -9,9 +9,38 @@ observed path, not a happy path, and an unmatched case fails closed (SEC-5).
 
 from __future__ import annotations
 
+import secrets
 import time
 
+from . import __version__ as _harness_version
+
 from .broker import CredentialBroker
+
+
+class _MatrixStore:
+    """NM-VER-8: stamps the run's component matrix on every appended entry."""
+
+    def __init__(self, store, component_matrix):
+        self._store = store
+        self._matrix = component_matrix
+
+    def append(self, *args, **kwargs):
+        kwargs.setdefault("component_matrix", self._matrix)
+        return self._store.append(*args, **kwargs)
+
+    def read_all(self):
+        return self._store.read_all()
+
+    def verify_chain(self):
+        return self._store.verify_chain()
+
+    @property
+    def path(self):
+        return self._store.path
+
+    @property
+    def payload_store_path(self):
+        return getattr(self._store, 'payload_store_path', None)
 from .caserecord import CaseRecordStore
 from .evidence import ApproverPolicy, EscalationDispatch, build_evidence_bundle
 from .guardrail import Decision, Guardrail
@@ -46,24 +75,75 @@ class RunOutcome:
 
 
 class Runtime:
-    def __init__(self, aop: dict, record_path: str, approver: ApproverPolicy | None = None):
+    def __init__(self, aop: dict, record_path: str, approver: ApproverPolicy | None = None,
+                 payload_store_path: str | None = None):
         self.aop = aop
         self.aop_ref = "%s@%s" % (aop["aop"], aop["version"])
         self.guardrail = Guardrail(aop)
         self.broker = CredentialBroker(aop)
         self.dispatch = EscalationDispatch(aop.get("coordination", {}).get("escalation_routes", []))
         self.approver = approver or ApproverPolicy()
-        self.store = CaseRecordStore(record_path)
+        # SEC-16: workload identity per run.
+        self.workload_id = "wl-" + secrets.token_urlsafe(8)
+        # NM-VER-8: the component matrix every entry carries.
+        self.component_matrix = {
+            "harness": "aop-reference-harness " + _harness_version,
+            "aop_ref": self.aop_ref,
+            "workload_id": self.workload_id,
+            "policy_bundle": "digest of the bound AOP document (ARC-TB1 records the digest per run)",
+        }
+        self.store = _MatrixStore(CaseRecordStore(record_path, payload_store_path=payload_store_path),
+                                  self.component_matrix)
         self.accountable_owner = aop.get("governance", {}).get("accountable_owner")
         # NM-VER-6: an optional revocation provider; called with the bound ref
         # before a run binds. Returns a dict or None.
         self.revocation_provider = None
+        # CR-025: the incident lifecycle state.
+        self.incidents: list[dict] = []
         self.halted = False
         self.stats = {"runs": 0, "executed": 0, "approvals": 0, "escalations": 0, "prohibited": 0, "fail_closed": 0, "holds": 0, "budget_escalations": 0, "duplicates_answered": 0}
         # RA-10: executed action digests per case, for duplicate delivery.
         self._executed_digests: dict[str, dict] = {}
         # NM-CRD-4: per-case usage counters keyed by action class.
         self._class_usage: dict[str, int] = {}
+
+    def declare_incident(self, incident_type: str, severity: str, by: str) -> dict:
+        """CR-025: declare an incident: the domain holds at the enforcement
+        point, the incident is recorded, and recovery runs the full path
+        (integrity check, then the owner-gated resumption)."""
+        incident = {"type": incident_type, "severity": severity, "by": by,
+                    "declared_at": time.time(), "state": "responding"}
+        self.incidents.append(incident)
+        self.halted = True
+        return incident
+
+    def recover(self, role: str) -> dict:
+        """CR-025: recovery requires the integrity check to pass and the
+        accountable owner's resumption decision. A broken chain refuses."""
+        intact, problems = self.store.verify_chain()
+        if not intact:
+            return {"resumed": False, "reason": "case record integrity check failed: %s" % "; ".join(problems[:2])}
+        if not self.resume(role):
+            return {"resumed": False, "reason": "resumption requires the accountable owner (SEC-15)"}
+        for incident in self.incidents:
+            if incident["state"] != "recovered":
+                incident["state"] = "recovered"
+                incident["recovered_by"] = role
+        return {"resumed": True, "incidents_recovered": len(self.incidents)}
+
+    def record_migration(self, original_case_id: str, new_case_id: str, reason: str) -> dict:
+        """RA-23: mark on the original record that the case migrated to a
+        linked new run. Append-only: the original entries are never rewritten."""
+        entries = self.store.read_all()
+        original = next((e for e in entries if e.get("case_id") == original_case_id), None)
+        if original is None:
+            raise ValueError("cannot migrate: no record for %s" % original_case_id)
+        return self.store.append(original_case_id, self.aop_ref, None,
+                                 {"migration": True, "new_case_id": new_case_id, "reason": reason},
+                                 original.get("context_snapshot", "erasure://" + original_case_id),
+                                 None, None, "migrated", None,
+                                 {"result": RunOutcome.INCONCLUSIVE,
+                                  "note": "case migrated to %s; linked run carries the work (RA-23)" % new_case_id})
 
     def emergency_stop(self, role: str) -> dict:
         """SEC-15: a named role halts every subsequent run in the domain at
@@ -219,7 +299,9 @@ class Runtime:
 
             # Execute with a scoped credential (SEC-3), scoped to the digest.
             credential = self.broker.issue(action, ACTION_CLASSES.get(action, "default"), decision, approval_record={"approved": True})
-            if credential is None or not self.broker.validate(credential, action):
+            if credential is not None:
+                credential["workload_id"] = self.workload_id
+            if credential is None or not self.broker.validate(credential, action, workload=self.workload_id):
                 self.stats["fail_closed"] += 1
                 notes.append("%s failed closed at the credential broker" % action)
                 outcome = RunOutcome.INCONCLUSIVE
@@ -235,7 +317,8 @@ class Runtime:
         final_result = case.get("outcome", {}).get("result", outcome) if outcome == RunOutcome.ACHIEVED else outcome
         self.store.append(case_id, self.aop_ref, variant["id"], context, snapshot_ref,
                           None, None, "complete", None,
-                          {"result": final_result, "notes": notes})
+                          {"result": final_result, "notes": notes},
+                          component_matrix=self.component_matrix)
         return {"case_id": case_id, "outcome": final_result, "variant": variant["id"], "notes": notes}
 
     def emit(self) -> list[dict]:

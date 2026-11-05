@@ -43,6 +43,7 @@ def reconstruct_trace(path: str, case_id: str, aop_rule_index: dict | None = Non
 
     trace = []
     checks = {"rule_reconstructible": True, "digest_present": True}
+    tombstones = [e for e in entries if e.get("decision") == "erasure-tombstone"]
     for e in entries:
         rule = e.get("rule")
         decision = e.get("decision")
@@ -66,9 +67,10 @@ def reconstruct_trace(path: str, case_id: str, aop_rule_index: dict | None = Non
                     step["reconstruction_note"] = "rule not present in the bound AOP version's rule set"
         trace.append(step)
 
-    return {
+    verdict = "reconstructed" if checks["rule_reconstructible"] else "partial"
+    result = {
         "level": "R2",
-        "verdict": "reconstructed" if checks["rule_reconstructible"] else "partial",
+        "verdict": verdict,
         "case_id": case_id,
         "checks": checks,
         "states_observed": [t["decision"] for t in trace],
@@ -76,6 +78,15 @@ def reconstruct_trace(path: str, case_id: str, aop_rule_index: dict | None = Non
         "r3_available": False,
         "r3_note": "controlled re-execution requires its own authorization decision (RP-2); a record is not an authorization",
     }
+    if tombstones:
+        # NM-ASR-7 / RP-5: the record states which claims survive and which
+        # are withdrawn after erasure.
+        latest = tombstones[-1]
+        result["verdict"] = "narrowed"
+        result["erasure"] = {"by": latest.get("approver"),
+                             "surviving_claims": (latest.get("outcome") or {}).get("surviving_claims", []),
+                             "withdrawn_claims": (latest.get("outcome") or {}).get("withdrawn_claims", [])}
+    return result
 
 
 def verify_third_party(record_path: str, aop_rule_index: dict, case_ids: list[str] | None = None) -> dict:

@@ -36,6 +36,7 @@ class CredentialBroker:
             "token": secrets.token_urlsafe(24),
             "action": action,
             "action_class": action_class,
+            "workload_id": authority_decision.get("workload_id"),
             "issued_at": time.time(),
             "expires_at": time.time() + self.ttl_seconds,
             "authority_decision": authority_decision["decision"],
@@ -44,12 +45,15 @@ class CredentialBroker:
         self._issued_log.append(credential)
         return credential
 
-    def validate(self, credential: dict, action: str) -> bool:
-        """One-shot validation: the credential must be unexpired and scoped to
-        exactly this action. A used credential is revoked on validation."""
+    def validate(self, credential: dict, action: str, workload: str | None = None) -> bool:
+        """One-shot validation: unexpired, scoped to exactly this action, and
+        presented by the workload it was issued to (SEC-16). A credential
+        presented by a different workload is refused."""
         if credential.get("action") != action:
             return False
         if time.time() > credential.get("expires_at", 0):
+            return False
+        if credential.get("workload_id") and workload is not None and credential["workload_id"] != workload:
             return False
         return True
 

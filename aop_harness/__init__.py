@@ -6,4 +6,4 @@ credential broker, the escalation dispatch, the approver evidence bundle, and
 the append-only tamper-evident case record. Standard library only.
 """
 
-__version__ = "0.1.0"
+__version__ = "0.5.0"
