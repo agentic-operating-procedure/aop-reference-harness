@@ -4,6 +4,16 @@ All notable changes to this repository are documented here. Format follows [Keep
 
 ## [Unreleased]
 
+## [v0.5.0] - 2026-11-05
+
+### Added (Wave H3: CR-021/022/024/025/026)
+
+- Workload identity per run with cross-workload credential refusal (SEC-16); the component matrix stamped on every case-record entry (NM-VER-8).
+- The incident lifecycle: declare-respond-recover with the integrity check and owner-gated resumption (CR-025).
+- Erasure-compatible evidence: payload externalisation to a side store, shredding with an appended tombstone, chain preserved, replay claims narrowed (NM-ASR-7).
+- In-flight migration markers (RA-23).
+
+
 ## [v0.4.0] - 2026-11-05
 
 ### Added (Wave H2)
@@ -46,7 +56,8 @@ All notable changes to this repository are documented here. Format follows [Keep
 - Published the scripted reference agent: the least authoritative, most replaceable part of the estate.
 - Published the Phase 4 end-to-end gate and passed it: one procedure compiles, publishes, resolves with an intact provenance chain, and executes 40 cases under the guardrail with complete, chain-verified case records.
 
-[Unreleased]: https://github.com/agentic-operating-procedure/aop-reference-harness/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/agentic-operating-procedure/aop-reference-harness/compare/v0.5.0...HEAD
+[v0.5.0]: https://github.com/agentic-operating-procedure/aop-reference-harness/compare/v0.4.0...v0.5.0
 [v0.4.0]: https://github.com/agentic-operating-procedure/aop-reference-harness/compare/v0.3.0...v0.4.0
 [v0.3.0]: https://github.com/agentic-operating-procedure/aop-reference-harness/compare/v0.2.0...v0.3.0
 [v0.2.0]: https://github.com/agentic-operating-procedure/aop-reference-harness/compare/v0.1.0...v0.2.0
